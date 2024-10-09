@@ -51,6 +51,14 @@
 #  define MAX_DNS_PROPERTIES   8
 #endif
 
+#if defined(__amigaos4__)
+#  include <proto/exec.h>
+#  include <exec/lists.h>
+#  include <exec/nodes.h>
+#  include <proto/bsdsocket.h>
+#  include <bsdsocket/socketbasetags.h>
+#endif
+
 #if defined(CARES_USE_LIBRESOLV)
 #  include <resolv.h>
 #endif
@@ -166,6 +174,83 @@ static ares_status_t ares_init_sysconfig_riscos(const ares_channel_t *channel,
   }
 
   return status;
+}
+#endif
+
+#if defined (__amigaos4__)
+static ares_status_t ares_init_sysconfig_amiga(const ares_channel_t *channel,
+                                                ares_sysconfig_t     *sysconfig)
+{
+  size_t        i;
+  ares_status_t status;
+
+  struct SocketIFace *ISocket;
+  struct ExecIFace *IExec = (struct ExecIFace *)(*(struct ExecBase **)4)->MainInterface;
+
+  struct Library *base = IExec->OpenLibrary("bsdsocket.library", 4);
+
+  if(base) {
+    ISocket = (struct SocketIFace *)IExec->GetInterface(base, "main", 1, NULL);
+    if(ISocket) {
+      ULONG dnsapi = 0;
+
+      ISocket->SocketBaseTags(SBTM_GETREF(SBTC_HAVE_DNS_API), (ULONG)&dnsapi,
+                     TAG_DONE);
+
+      if(dnsapi) {
+        /* Use the DNS API in bsdsocket.library
+         * This exists in Roadshow
+         */
+        
+        struct List *dnslist = ISocket->ObtainDomainNameServerList();
+        struct DomainNameServerNode *node;
+        struct DomainNameServerNode *nnode;
+                
+        if(dnslist == NULL) {
+          IExec->DropInterface(ISocket);
+          IExec->CloseLibrary(base);
+          return ARES_ENOMEM;
+        }
+        
+        if(IsListEmpty(dnslist)) {
+          /* No DNS entries */
+          IExec->DropInterface(ISocket);
+          IExec->CloseLibrary(base);
+          return ARES_SUCCESS;
+        }
+        
+        node = (struct DomainNameServerNode *)IExec->GetHead(dnslist);
+
+        do {
+          nnode = (struct DomainNameServerNode *)IExec->GetSucc((struct MinNode *)node);
+          
+          status = ares_sconfig_append_fromstr(channel, &sysconfig->sconfig, node->dnsn_Address,
+                                           ARES_TRUE);
+
+          if (status != ARES_SUCCESS) {
+            IExec->DropInterface(ISocket);
+            IExec->CloseLibrary(base);
+            return status;
+          }
+    
+        } while((node = nnode));
+
+        ISocket->ReleaseDomainNameServerList(dnslist);
+        
+      } else {
+        /* DNS API does not exist */
+        IExec->DropInterface(ISocket);
+        IExec->CloseLibrary(base);
+        return ARES_ENOMEM;
+      }
+
+      IExec->DropInterface(ISocket);
+    }
+
+    IExec->CloseLibrary(base);
+  }
+
+  return ARES_SUCCESS;
 }
 #endif
 
@@ -508,6 +593,8 @@ ares_status_t ares_init_by_sysconfig(ares_channel_t *channel)
   status = ares_init_sysconfig_mvs(channel, &sysconfig);
 #elif defined(__riscos__)
   status = ares_init_sysconfig_riscos(channel, &sysconfig);
+#elif defined(__amigaos4__)
+  status = ares_init_sysconfig_amiga(channel, &sysconfig);
 #elif defined(WATT32)
   status = ares_init_sysconfig_watt32(channel, &sysconfig);
 #elif defined(ANDROID) || defined(__ANDROID__)
